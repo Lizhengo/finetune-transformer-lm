@@ -9,6 +9,7 @@ import csv
 import numpy as np
 import json
 from tqdm import tqdm
+import random
 
 
 seed = 3535999445
@@ -28,8 +29,20 @@ def _data_process(path):
         if desc != '' and ans != '':
             st.append(desc)
             ct1.append(ans)
-            y.append(0)
     ct2 = ct1[1:] + [ct1[0]]
+
+    assert len(ct1) == len(ct2)
+    for i in range(len(ct1)):
+        rand = random.random()
+        if rand <= 0.5:
+            y.append(0)
+        else:
+            y.append(1)
+            s1 = ct1[i]
+            s2 = ct2[i]
+            ct1[i] = s2
+            ct2[i] = s1
+
     return st, ct1, ct2, y
 
 
