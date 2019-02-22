@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# File: analysis.py
+# Author: lizhen21@baidu.com
+# Date: 19-2-22
+
 import os
 import json
 import numpy as np

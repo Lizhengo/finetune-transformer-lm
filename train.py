@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# File: train.py
+# Author: lizhen21@baidu.com
+# Date: 19-2-22
+
 import os
 import time
 import math
@@ -14,8 +20,7 @@ from sklearn.utils import shuffle
 from sklearn.metrics import accuracy_score
 
 from opt import adam, warmup_cosine, warmup_linear, warmup_constant
-from datasets import rocstories
-from analysis import rocstories as rocstories_analysis
+from datasets import data_process
 from text_utils import TextEncoder
 from utils import encode_dataset, flatten, iter_data, find_trainable_variables, convert_gradient_to_tensor, shape_list, ResultLogger, assign_to_gpu, average_grads, make_path
 
@@ -153,6 +158,8 @@ def embed(X, we):
     return h
 
 def clf(x, ny, w_init=tf.random_normal_initializer(stddev=0.02), b_init=tf.constant_initializer(0), train=False):
+    # x.size = [n_batch_train/n_gpu * 2, n_embd]
+    # ny = 1
     with tf.variable_scope('clf'):
         nx = shape_list(x)[-1]
         w = tf.get_variable("w", [nx, ny], initializer=w_init)
@@ -160,6 +167,9 @@ def clf(x, ny, w_init=tf.random_normal_initializer(stddev=0.02), b_init=tf.const
         return tf.matmul(x, w)+b
 
 def model(X, M, Y, train=False, reuse=False):
+    # X = tf.placeholder(tf.int32, [n_batch_train/n_gpu, 2, n_ctx, 2])
+    # M = tf.placeholder(tf.float32, [n_batch_train/n_gpu, 2, n_ctx])
+    # Y = tf.placeholder(tf.int32, [n_batch_train/n_gpu])
     with tf.variable_scope('model', reuse=reuse):
         we = tf.get_variable("we", [n_vocab+n_special+n_ctx, n_embd], initializer=tf.random_normal_initializer(stddev=0.02))
         we = dropout(we, embd_pdrop, train)
@@ -168,43 +178,62 @@ def model(X, M, Y, train=False, reuse=False):
         M = tf.reshape(M, [-1, n_ctx])
 
         h = embed(X, we)
+        # h = tf.placeholder(tf.int32, [-1, n_ctx, 2, n_embd])
         for layer in range(n_layer):
             h = block(h, 'h%d'%layer, train=train, scale=True)
 
         lm_h = tf.reshape(h[:, :-1], [-1, n_embd])
+        # lm_h.size = [n_batch_train/n_gpu * 2 * (n_ctx-1), n_embd]
         lm_logits = tf.matmul(lm_h, we, transpose_b=True)
+        # lm_logits.size = [n_batch_train/n_gpu * 2 * n_ctx, n_vocab+n_special+n_ctx]
         lm_losses = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=lm_logits, labels=tf.reshape(X[:, 1:, 0], [-1]))
         lm_losses = tf.reshape(lm_losses, [shape_list(X)[0], shape_list(X)[1]-1])
+        # lm_losses.size = [n_batch_train/n_gpu * 2, n_ctx-1]
         lm_losses = tf.reduce_sum(lm_losses*M[:, 1:], 1)/tf.reduce_sum(M[:, 1:], 1)
+        # lm_losses.size = [n_batch_train/n_gpu * 2, 1]
 
         clf_h = tf.reshape(h, [-1, n_embd])
+        # clf_h.size = [n_batch_train/n_gpu * 2 * n_ctx, n_embd]
         pool_idx = tf.cast(tf.argmax(tf.cast(tf.equal(X[:, :, 0], clf_token), tf.float32), 1), tf.int32)
         clf_h = tf.gather(clf_h, tf.range(shape_list(X)[0], dtype=tf.int32)*n_ctx+pool_idx)
 
         clf_h = tf.reshape(clf_h, [-1, 2, n_embd])
+        # clf_h.size = [n_batch_train/n_gpu, 2, n_embd]
         if train and clf_pdrop > 0:
             shape = shape_list(clf_h)
             shape[1] = 1
             clf_h = tf.nn.dropout(clf_h, 1-clf_pdrop, shape)
         clf_h = tf.reshape(clf_h, [-1, n_embd])
+        # clf_h.size = [n_batch_train/n_gpu * 2, n_embd]
         clf_logits = clf(clf_h, 1, train=train)
+        # clf_logits.size = [n_batch_train/n_gpu * 2, 1]
         clf_logits = tf.reshape(clf_logits, [-1, 2])
-
+        # clf_logits.size = [n_batch_train/n_gpu, 2]
         clf_losses = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=clf_logits, labels=Y)
+        # clf_losses.size = [n_batch_train/n_gpu]
         return clf_logits, clf_losses, lm_losses
 
 def mgpu_train(*xs):
+    # xs[0]: X_train = tf.placeholder(tf.int32, [n_batch_train, 2, n_ctx, 2])
+    # xs[1]: M_train = tf.placeholder(tf.float32, [n_batch_train, 2, n_ctx])
+    # xs[2]: Y_train = tf.placeholder(tf.int32, [n_batch_train])
     gpu_ops = []
     gpu_grads = []
     xs = (tf.split(x, n_gpu, 0) for x in xs)
+
     for i, xs in enumerate(zip(*xs)):
+        # i = 3, xs = [xs[0]_i, x[1]_i, x[2]_i]
         do_reuse = True if i > 0 else None
         with tf.device(assign_to_gpu(i, "/gpu:0")), tf.variable_scope(tf.get_variable_scope(), reuse=do_reuse):
             clf_logits, clf_losses, lm_losses = model(*xs, train=True, reuse=do_reuse)
-            if lm_coef > 0:
-                train_loss = tf.reduce_mean(clf_losses) + lm_coef*tf.reduce_mean(lm_losses)
+            # clf_losses.size = [n_batch_train/n_gpu]
+            # clf_logits.size = [n_batch_train/n_gpu, 2]
+            # lm_losses.size = [n_batch_train/n_gpu * 2, 1]
+
+            if clf_coef > 0:
+                train_loss = tf.reduce_mean(lm_losses) + clf_coef*tf.reduce_mean(clf_losses)
             else:
-                train_loss = tf.reduce_mean(clf_losses)
+                train_loss = tf.reduce_mean(lm_losses)
             params = find_trainable_variables("model")
             grads = tf.gradients(train_loss, params)
             grads = list(zip(grads, params))
@@ -227,6 +256,7 @@ def mgpu_predict(*xs):
     return ops
 
 def transform_roc(X1, X2, X3):
+    # X1: [[id1_sen1, id2_sen1, ...], [id1_sen2, id2_sen2], ...]
     n_batch = len(X1)
     xmb = np.zeros((n_batch, 2, n_ctx, 2), dtype=np.int32)
     mmb = np.zeros((n_batch, 2, n_ctx), dtype=np.float32)
@@ -245,17 +275,21 @@ def transform_roc(X1, X2, X3):
     return xmb, mmb
 
 def iter_apply(Xs, Ms, Ys):
-    fns = [lambda x:np.concatenate(x, 0), lambda x:float(np.sum(x))]
+    fns = [lambda x:np.concatenate(x, 0), lambda x:float(np.sum(x)), lambda x:float(np.sum(x))]
     results = []
     for xmb, mmb, ymb in iter_data(Xs, Ms, Ys, n_batch=n_batch_train, truncate=False, verbose=True):
         n = len(xmb)
         if n == n_batch_train:
-            res = sess.run([eval_mgpu_logits, eval_mgpu_clf_loss], {X_train:xmb, M_train:mmb, Y_train:ymb})
+            res = sess.run([eval_mgpu_logits, eval_mgpu_clf_loss, eval_mgpu_lm_loss],
+                           {X_train:xmb, M_train:mmb, Y_train:ymb})
         else:
-            res = sess.run([eval_logits, eval_clf_loss], {X:xmb, M:mmb, Y:ymb})
+            res = sess.run([eval_logits, eval_clf_loss, eval_lm_loss],
+                           {X:xmb, M:mmb, Y:ymb})
         res = [r*n for r in res]
         results.append(res)
     results = zip(*results)
+    # results = [(eval_mgpu_logits1*n, eval_mgpu_logits2*n...), (eval_mgpu_clf_loss1*n, eval_mgpu_clf_loss2*n...),
+    #            (eval_mgpu_lm_loss1*n, eval_mgpu_lm_loss2*n...)]
     return [fn(res) for res, fn in zip(results, fns)]
 
 def iter_predict(Xs, Ms):
@@ -274,20 +308,26 @@ def save(path):
     joblib.dump(ps, make_path(path))
 
 def log():
-    global best_score
-    tr_logits, tr_cost = iter_apply(trX[:n_valid], trM[:n_valid], trY[:n_valid])
-    va_logits, va_cost = iter_apply(vaX, vaM, vaY)
-    tr_cost = tr_cost/len(trY[:n_valid])
-    va_cost = va_cost/n_valid
-    tr_acc = accuracy_score(trY[:n_valid], np.argmax(tr_logits, 1))*100.
-    va_acc = accuracy_score(vaY, np.argmax(va_logits, 1))*100.
-    logger.log(n_epochs=n_epochs, n_updates=n_updates, tr_cost=tr_cost, va_cost=va_cost, tr_acc=tr_acc, va_acc=va_acc)
-    print('%d %d %.3f %.3f %.2f %.2f'%(n_epochs, n_updates, tr_cost, va_cost, tr_acc, va_acc))
-    if submit:
-        score = va_acc
-        if score > best_score:
-            best_score = score
-            save(os.path.join(save_dir, desc, 'best_params.jl'))
+    global best_ppl
+    tr_clf_logits, tr_clf_cost, tr_lm_cost = iter_apply(trX[:n_valid], trM[:n_valid], trY[:n_valid])
+    va_clf_logits, va_clf_cost, va_lm_cost = iter_apply(vaX, vaM, vaY)
+    tr_cost = tr_lm_cost/len(trY[:n_valid])
+    va_cost = va_lm_cost/n_valid
+    tr_acc = accuracy_score(trY[:n_valid], np.argmax(tr_clf_logits, 1))*100.
+    va_acc = accuracy_score(vaY, np.argmax(va_clf_logits, 1))*100.
+    logger.log(n_epochs=n_epochs, n_updates=n_updates, tr_cost=np.exp(tr_cost),
+               va_cost=np.exp(va_cost), tr_acc=tr_acc, va_acc=va_acc)
+    print('\nn_epochs: %d , n_updates: %d , tr_ppl: %.3f , va_ppl: %.3f , tr_clf_acc: %.2f , val_clf_acc: %.2f\n'
+          %(n_epochs, n_updates, np.exp(tr_cost), np.exp(va_cost), tr_acc, va_acc))
+
+    ppl = np.exp(va_cost)
+
+    if ppl < best_ppl or best_ppl < 0:
+        best_ppl = ppl
+        best_sv_name = os.path.join(save_dir, desc + '-best')
+        print("Saving best model to %s." % save_dir)
+        sv.save(sess, best_sv_name)
+        # save(os.path.join(save_dir, desc, 'best_params.jl'))
 
 argmax = lambda x:np.argmax(x, 1)
 
@@ -317,18 +357,19 @@ def predict():
         for i, prediction in enumerate(predictions):
             f.write('{}\t{}\n'.format(i, prediction))
 
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--desc', type=str)
+    parser.add_argument('--desc', type=str, default='gpt-baike-qa')
     parser.add_argument('--dataset', type=str)
     parser.add_argument('--log_dir', type=str, default='log/')
     parser.add_argument('--save_dir', type=str, default='save/')
-    parser.add_argument('--data_dir', type=str, default='data/')
+    parser.add_argument('--data_dir', type=str, default='baike_qa2019/')
     parser.add_argument('--submission_dir', type=str, default='submission/')
     parser.add_argument('--submit', action='store_true')
     parser.add_argument('--analysis', action='store_true')
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--n_iter', type=int, default=3)
+    parser.add_argument('--n_iter', type=int, default=1)
     parser.add_argument('--n_batch', type=int, default=8)
     parser.add_argument('--max_grad_norm', type=int, default=1)
     parser.add_argument('--lr', type=float, default=6.25e-5)
@@ -347,10 +388,8 @@ if __name__ == '__main__':
     parser.add_argument('--opt', type=str, default='adam')
     parser.add_argument('--afn', type=str, default='gelu')
     parser.add_argument('--lr_schedule', type=str, default='warmup_linear')
-    parser.add_argument('--encoder_path', type=str, default='model/encoder_bpe_40000.json')
-    parser.add_argument('--bpe_path', type=str, default='model/vocab_40000.bpe')
-    parser.add_argument('--n_transfer', type=int, default=12)
-    parser.add_argument('--lm_coef', type=float, default=0.5)
+    parser.add_argument('--encoder_path', type=str, default='baike_qa2019/vocab.json')
+    parser.add_argument('--clf_coef', type=float, default=0.5)
     parser.add_argument('--b1', type=float, default=0.9)
     parser.add_argument('--b2', type=float, default=0.999)
     parser.add_argument('--e', type=float, default=1e-8)
@@ -363,11 +402,16 @@ if __name__ == '__main__':
     tf.set_random_seed(seed)
 
     logger = ResultLogger(path=os.path.join(log_dir, '{}.jsonl'.format(desc)), **args.__dict__)
-    text_encoder = TextEncoder(encoder_path, bpe_path)
+    text_encoder = TextEncoder(encoder_path)
     encoder = text_encoder.encoder
+    # encoder = json.load(open(encoder_path)), ex. {".": 1, ",": 2, "t": 3, "h": 4, ...}
     n_vocab = len(text_encoder.encoder)
+    print('vocab size: ', n_vocab)
 
-    (trX1, trX2, trX3, trY), (vaX1, vaX2, vaX3, vaY), (teX1, teX2, teX3) = encode_dataset(rocstories(data_dir), encoder=text_encoder)
+    (trX1, trX2, trX3, trY), (vaX1, vaX2, vaX3, vaY), (teX1, teX2, teX3) = encode_dataset(data_process(data_dir),
+                                                                                          encoder=text_encoder)
+    # trX1/trX2/trX3: [[id1_sen1, id2_sen1,...],[id1_sen2, id2_sen2],...]
+    # trY: [0, 1, 1,....]
     n_y = 2
     encoder['_start_'] = len(encoder)
     encoder['_delimiter_'] = len(encoder)
@@ -377,9 +421,10 @@ if __name__ == '__main__':
     max_len = n_ctx//2-2
     n_ctx = min(max([len(x1[:max_len])+max(len(x2[:max_len]), len(x3[:max_len])) for x1, x2, x3 in zip(trX1, trX2, trX3)]+[len(x1[:max_len])+max(len(x2[:max_len]), len(x3[:max_len])) for x1, x2, x3 in zip(vaX1, vaX2, vaX3)]+[len(x1[:max_len])+max(len(x2[:max_len]), len(x3[:max_len])) for x1, x2, x3 in zip(teX1, teX2, teX3)])+3, n_ctx)
     trX, trM = transform_roc(trX1, trX2, trX3)
+    # trX: [n_batch, 2, n_ctx, 2], dtype=np.int32
+    # trM: [n_batch, 2, n_ctx], dtype=np.float32
     vaX, vaM = transform_roc(vaX1, vaX2, vaX3)
-    if submit:
-        teX, teM = transform_roc(teX1, teX2, teX3)
+    teX, teM = transform_roc(teX1, teX2, teX3)
 
     n_train = len(trY)
     n_valid = len(vaY)
@@ -395,49 +440,51 @@ if __name__ == '__main__':
     Y = tf.placeholder(tf.int32, [None])
 
     train, logits, clf_losses, lm_losses = mgpu_train(X_train, M_train, Y_train)
+    # clf_losses.size = [n_batch_train]
+    # clf_logits.size = [n_batch_train, 2]
+    # lm_losses.size = [n_batch_train * 2, 1]
     clf_loss = tf.reduce_mean(clf_losses)
+    lm_loss = tf.reduce_mean(lm_losses)
 
-    params = find_trainable_variables('model')
     sess = tf.Session(config=tf.ConfigProto(allow_soft_placement=True))
     sess.run(tf.global_variables_initializer())
 
-    shapes = json.load(open('model/params_shapes.json'))
-    offsets = np.cumsum([np.prod(shape) for shape in shapes])
-    init_params = [np.load('model/params_{}.npy'.format(n)) for n in range(10)]
-    init_params = np.split(np.concatenate(init_params, 0), offsets)[:-1]
-    init_params = [param.reshape(shape) for param, shape in zip(init_params, shapes)]
-    init_params[0] = init_params[0][:n_ctx]
-    init_params[0] = np.concatenate([init_params[1], (np.random.randn(n_special, n_embd)*0.02).astype(np.float32), init_params[0]], 0)
-    del init_params[1]
-
-    if n_transfer == -1:
-        n_transfer = 0
+    restore_v = dict()
+    for v in tf.trainable_variables():
+        print("store:", v.name)
+        restore_v[v.name] = v
+    params = find_trainable_variables("model")
+    sv = tf.train.Saver(restore_v)
+    ckpt = tf.train.get_checkpoint_state(save_dir)
+    if ckpt and tf.train.checkpoint_exists(ckpt.model_checkpoint_path):
+        print("Reading param from %s" % ckpt.model_checkpoint_path)
+        sv.restore(sess, ckpt.model_checkpoint_path)
     else:
-        n_transfer = 1+n_transfer*12
-    sess.run([p.assign(ip) for p, ip in zip(params[:n_transfer], init_params[:n_transfer])])
+        print("Created model with fresh param.")
+
+    if not os.path.isdir(save_dir):
+        os.makedirs(save_dir)
 
     eval_mgpu_logits, eval_mgpu_clf_losses, eval_mgpu_lm_losses = mgpu_predict(X_train, M_train, Y_train)
+    eval_mgpu_clf_loss = tf.reduce_mean(eval_mgpu_clf_losses)
+    eval_mgpu_lm_loss = tf.reduce_mean(eval_mgpu_lm_losses)
+
     eval_logits, eval_clf_losses, eval_lm_losses = model(X, M, Y, train=False, reuse=True)
     eval_clf_loss = tf.reduce_mean(eval_clf_losses)
-    eval_mgpu_clf_loss = tf.reduce_mean(eval_mgpu_clf_losses)
+    eval_lm_loss = tf.reduce_mean(eval_lm_losses)
 
     n_updates = 0
     n_epochs = 0
-    if dataset != 'stsb':
-        trYt = trY
-    if submit:
-        save(os.path.join(save_dir, desc, 'best_params.jl'))
-    best_score = 0
+
+    best_ppl = -1
     for i in range(n_iter):
-        for xmb, mmb, ymb in iter_data(*shuffle(trX, trM, trYt, random_state=np.random), n_batch=n_batch_train, truncate=True, verbose=True):
-            cost, _ = sess.run([clf_loss, train], {X_train:xmb, M_train:mmb, Y_train:ymb})
+        for xmb, mmb, ymb in iter_data(*shuffle(trX, trM, trY, random_state=np.random), n_batch=n_batch_train, truncate=True, verbose=True):
+            cost, _ = sess.run([lm_loss, train], {X_train:xmb, M_train:mmb, Y_train:ymb})
             n_updates += 1
-            if n_updates in [1000, 2000, 4000, 8000, 16000, 32000] and n_epochs == 0:
+            if n_updates % (max((n_train//n_batch_train) // 10, 1)) == 0:
                 log()
+                sv_name = os.path.join(save_dir, desc)
+                print("Saving model to %s." % save_dir)
+                sv.save(sess, sv_name, global_step=n_updates)
         n_epochs += 1
         log()
-    if submit:
-        sess.run([p.assign(ip) for p, ip in zip(params, joblib.load(os.path.join(save_dir, desc, 'best_params.jl')))])
-        predict()
-        if analysis:
-            rocstories_analysis(data_dir, os.path.join(submission_dir, 'ROCStories.tsv'), os.path.join(log_dir, 'rocstories.jsonl'))

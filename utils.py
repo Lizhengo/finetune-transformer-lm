@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# File: utils.py
+# Author: lizhen21@baidu.com
+# Date: 19-2-22
+
 import os
 import re
 import sys
@@ -11,16 +17,24 @@ from tensorflow.python.framework import function
 from tqdm import tqdm
 from functools import partial
 
+
 def encode_dataset(*splits, encoder):
+    # input : (trX1, trX2, trX3, trY), (vaX1, vaX2, vaX3, vaY), (teX1, teX2, teX3)
+    # (trX1, trX2, trX3, trY) = ([sentence1, sentence2...],[quiz1_1, quiz1_2....],[quiz2_1, quiz2_2...],[0,1,1,0.....])
     encoded_splits = []
     for split in splits[0]:
+        # (trX1, trX2, trX3, trY)
         fields = []
         for field in split:
+            # trX1: [sentence1, sentence2...]
             if isinstance(field[0], str):
                 field = encoder.encode(field)
+                # field = [[id1_sen1, id2_sen2,...],[id1_sen2, id2_sen2],...]
             fields.append(field)
+            # fields = [[[id1_sen1_trX1, id2_sen2_trX1,...],[id1_sen2_trX1, id2_sen2_trX1],...],...]
         encoded_splits.append(fields)
     return encoded_splits
+    # encoded_splits = [[[[id1_sen1_trX1, id2_sen2_trX1,...],[id1_sen2_trX1, id2_sen2_trX1],...],...]....]
 
 def stsb_label_encoding(labels, nclass=6):
     """
@@ -97,7 +111,11 @@ def remove_none(l):
     return [e for e in l if e is not None]
 
 def iter_data(*datas, n_batch=128, truncate=False, verbose=False, max_batches=float("inf")):
+    # trX: [n_batch, 2, n_ctx, 2], dtype=np.int32
+    # trM: [n_batch, 2, n_ctx], dtype=np.float32
+    # trY: [n_batch], dtype=np.int32
     n = len(datas[0])
+
     if truncate:
         n = (n//n_batch)*n_batch
     n = min(n, max_batches*n_batch)

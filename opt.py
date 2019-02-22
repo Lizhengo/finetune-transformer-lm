@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# File: opt.py
+# Author: lizhen21@baidu.com
+# Date: 19-2-22
+
 import math
 import numpy as np
 import tensorflow as tf
