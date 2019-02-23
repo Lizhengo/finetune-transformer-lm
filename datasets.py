@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # File: datasets.py
 # Author: lizhen21@baidu.com
@@ -10,13 +10,13 @@ import numpy as np
 import json
 from tqdm import tqdm
 import random
-
+import codecs
 
 seed = 3535999445
 
 
 def _data_process(path):
-    f = open(path, 'r', encoding='utf-8')
+    f = codecs.open(path, 'r', encoding='utf-8')
 
     st = []
     ct1 = []

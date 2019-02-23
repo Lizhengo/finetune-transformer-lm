@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # File: train.py
 # Author: lizhen21@baidu.com
@@ -374,10 +374,10 @@ if __name__ == '__main__':
     parser.add_argument('--max_grad_norm', type=int, default=1)
     parser.add_argument('--lr', type=float, default=6.25e-5)
     parser.add_argument('--lr_warmup', type=float, default=0.002)
-    parser.add_argument('--n_ctx', type=int, default=512)
-    parser.add_argument('--n_embd', type=int, default=768)
-    parser.add_argument('--n_head', type=int, default=12)
-    parser.add_argument('--n_layer', type=int, default=12)
+    parser.add_argument('--n_ctx', type=int, default=64)
+    parser.add_argument('--n_embd', type=int, default=128)
+    parser.add_argument('--n_head', type=int, default=2)
+    parser.add_argument('--n_layer', type=int, default=2)
     parser.add_argument('--embd_pdrop', type=float, default=0.1)
     parser.add_argument('--attn_pdrop', type=float, default=0.1)
     parser.add_argument('--resid_pdrop', type=float, default=0.1)

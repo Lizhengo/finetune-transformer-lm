@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # File: vocab.py
 # Author: lizhen21@baidu.com
@@ -6,10 +6,11 @@
 
 import os
 import json
+import codecs
 
 
 def vocab_process(data_dir, size=50000):
-    f = open(os.path.join(data_dir, 'baike_qa_train.json'), 'r', encoding='utf-8')
+    f = codecs.open(os.path.join(data_dir, 'baike_qa_train.json'), 'r', encoding='utf-8')
     vocab = dict()
 
     for line in f:
@@ -34,7 +35,7 @@ def vocab_process(data_dir, size=50000):
     for word, _ in sorted(vocab.items(), key=lambda x: x[1], reverse=True)[:size]:
         sort_vocab[word] = i
         i += 1
-    with open(os.path.join(data_dir, 'vocab.json'), "w", encoding='utf-8') as f:
+    with codecs.open(os.path.join(data_dir, 'vocab.json'), "w", encoding='utf-8') as f:
         json.dump(sort_vocab, f)
     return None
 
